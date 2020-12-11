@@ -7,6 +7,21 @@ const klawSync = require('klaw-sync');
 const { sep, resolve } = require('path');
 const uuid = require('uuid');
 
+const pathPckg = require('path');
+
+async function readSymLink(path){
+    return new Promise((resolve, reject) => {
+        fs.readlink(path, (err, tarPath) => {
+            if (err) {
+                console.log(err.message);
+                return resolve('');
+            }
+            const baseSrcPath = pathPckg.dirname(path);
+            return resolve(pathPckg.resolve(baseSrcPath, tarPath));
+        });
+    });
+}
+
 commander
   .version(packageJson.version)
   .option('-t, --title <string>', 'specify game name')
@@ -59,7 +74,8 @@ const getAdditionalInfo = async function getAdditionalInfo(parsedArgs) {
 const getFiles = function getFiles(input) {
   const stats = fs.statSync(input);
   if (stats.isDirectory()) {
-    return klawSync(input, { nodir: true });
+    return klawSync(input, { nodir: true })
+      .filter(f => !f.path.includes("/.git"));
   }
   // It should be a .love file
   return [{
@@ -68,13 +84,19 @@ const getFiles = function getFiles(input) {
   }];
 };
 
-getAdditionalInfo(commander).then((args) => {
+async function run() {
+  const args = await getAdditionalInfo(commander);
+
   const outputDir = resolve(args.output);
   const srcDir = resolve(__dirname, 'src');
 
   const files = getFiles(args.input);
-  const dirs = isDirectory(args.input) ? klawSync(args.input, { nofile: true }) : [];
-  const dirRelativePaths = dirs.map(f => f.path.replace(new RegExp(`^.*${args.input}`), ''));
+  const dirs = isDirectory(args.input) ?
+        klawSync(args.input, { nofile: true }).filter(f => !f.path.includes("/.git"))
+        : [];
+
+  const dirRelativePaths = dirs.map(f => f.path.replace(new RegExp(`^.*${args.input}`), ''))
+                               .filter(f => !f.includes("/.git"));
 
   const createFilePaths = dirRelativePaths.map((path) => {
     const splits = path.split(sep);
@@ -90,9 +112,21 @@ getAdditionalInfo(commander).then((args) => {
   for (let i = 0; i < files.length; i += 1) {
     const file = files[i];
     const relativePath = isDirectory(args.input) ?
-                            file.path.replace(new RegExp(`^.*${args.input}`), '') :
-                            '/game.love';
-    const buffer = fs.readFileSync(file.path);
+          file.path.replace(new RegExp(`^.*${args.input}`), '') :
+          '/game.love';
+
+    // TODO unwind all this - it's reading the symlinks as files, not dirs
+    console.log(file)
+    console.log(relativePath)
+    let buffer;
+    if (fs.lstatSync(file.path).isSymbolicLink()) {
+      const blob = await readSymLink(file.path);
+      console.log(blob);
+      buffer = fs.readFileSync(blob);
+    } else {
+      buffer = fs.readFileSync(file.path);
+    }
+
     fileMetadata.push({
       filename: relativePath,
       crunched: 0,
@@ -109,7 +143,7 @@ getAdditionalInfo(commander).then((args) => {
   if (args.memory < totalBuffer.length) {
     throw new Error(
       'The memory (-m, --memory [bytes]) allocated for your game should at least be as big as your assets. '
-      + `The total size of your assets is ${totalBuffer.length} bytes.`);
+        + `The total size of your assets is ${totalBuffer.length} bytes.`);
   }
 
   const jsArgs = {
@@ -127,23 +161,26 @@ getAdditionalInfo(commander).then((args) => {
 
   const fldr_name = args.compat ? "compat" : "release";
 
-  {
-    const template = fs.readFileSync(`${srcDir}/${fldr_name}/index.html`, 'utf8');
-    const renderedTemplate = mustache.render(template, args);
+  const template = fs.readFileSync(`${srcDir}/${fldr_name}/index.html`, 'utf8');
+  const renderedTemplate = mustache.render(template, args);
 
-    fs.mkdirsSync(outputDir);
-    fs.writeFileSync(`${outputDir}/index.html`, renderedTemplate);
-    fs.writeFileSync(`${outputDir}/game.js`, renderedGameTemplate);
-    fs.writeFileSync(`${outputDir}/game.data`, totalBuffer);
-    fs.copySync(`${srcDir}/${fldr_name}/love.js`, `${outputDir}/love.js`);
-    fs.copySync(`${srcDir}/${fldr_name}/love.wasm`, `${outputDir}/love.wasm`);
-    fs.copySync(`${srcDir}/${fldr_name}/theme`, `${outputDir}/theme`);
+  fs.mkdirsSync(outputDir);
+  fs.writeFileSync(`${outputDir}/index.html`, renderedTemplate);
+  fs.writeFileSync(`${outputDir}/game.js`, renderedGameTemplate);
+  fs.writeFileSync(`${outputDir}/game.data`, totalBuffer);
+  fs.copySync(`${srcDir}/${fldr_name}/love.js`, `${outputDir}/love.js`);
+  fs.copySync(`${srcDir}/${fldr_name}/love.wasm`, `${outputDir}/love.wasm`);
+  fs.copySync(`${srcDir}/${fldr_name}/theme`, `${outputDir}/theme`);
 
-    if (fldr_name === "release") {
-      fs.copySync(`${srcDir}/${fldr_name}/love.worker.js`, `${outputDir}/love.worker.js`);
-    }
+  if (fldr_name === "release") {
+    fs.copySync(`${srcDir}/${fldr_name}/love.worker.js`, `${outputDir}/love.worker.js`);
   }
-}).catch((e) => {
-  console.error(e.message); // eslint-disable-line no-console
-  process.exit(1);
-});
+}
+
+
+run()
+  .then((res, e) => {
+    console.error(e.stack);
+    console.error(e.message); // eslint-disable-line no-console
+    process.exit(1);
+  });
